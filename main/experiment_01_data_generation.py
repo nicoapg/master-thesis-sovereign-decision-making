@@ -9,90 +9,46 @@ from scipy import stats
 import logging
 import seaborn as sns
 import matplotlib.pyplot as plt
+from experiment_utils import (
+    generate_experiment_data,
+    create_ranking_from_results,
+    create_swarm_plot_kendalls_tau_vs_number_of_votes,
+    create_ridge_plot,
+    print_ranker_summary
+)
 
-# Configure logging to suppress ranker warnings
-logging.basicConfig(level=logging.ERROR)  # Only show ERROR level and above
-
-# Set the mode: "data_generation" or "data_analysis"
-MODE = "data_analysis"
-
-def make_choice(lhs_id: int, rhs_id: int, correctness: float = 0.8) -> int:
-    """
-    Generate a choice between two principles based on their IDs and a correctness probability.
-    
-    Args:
-        lhs_id: ID of the left-hand side principle
-        rhs_id: ID of the right-hand side principle
-        correctness: Probability of choosing the correct answer (default: 0.8)
-        
-    Returns:
-        A value from UserChoice enum (0, 1, 2, or 3)
-    """
-    # Determine which ID is smaller (the "right" answer)
-    right_answer = UserChoice.RHS if rhs_id < lhs_id else UserChoice.LHS
-    
-    # First, decide if we're going to pick the right or wrong answer
-    pick_right = np.random.random() < correctness
-    
-    # If we're picking the right answer
-    if pick_right:
-        # 95% chance of picking the right answer, 5% chance of tie
-        if np.random.random() < 0.95:
-            return right_answer
-        else:
-            return UserChoice.TIE
-    # If we're picking the wrong answer
-    else:
-        # 95% chance of picking the wrong answer, 5% chance of tie
-        if np.random.random() < 0.95:
-            return UserChoice.LHS if right_answer == UserChoice.RHS else UserChoice.RHS
-        else:
-            return UserChoice.TIE
-
-def create_ranking_from_results(results_df, experiment_id, ranker_type: RankingAlgorithms) -> list:
-    """
-    Creates a ranking using the specified ranker based on the results data.
-    
-    Args:
-        results_df: DataFrame containing the results data (this is the table with individual votes)
-        experiment_id: ID of the experiment to analyze
-        ranker_type: Type of ranker to use (from RankingAlgorithms enum)
-        
-    Returns:
-        List of principle IDs sorted by rank (highest to lowest)
-    """
-    # Filter results for the specific experiment and remove NO_CHOICE votes
-    experiment_votes = results_df[
-        (results_df['experiment_id'] == experiment_id) & 
-        (results_df['choice'] != UserChoice.NO_CHOICE)
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(DATA_DIR / 'experiment_analysis.log'),
+        logging.StreamHandler()
     ]
+)
+
+def create_analysis_folder(experiment_file: str) -> Path:
+    """
+    Create a timestamped folder for the analysis results.
     
-    # Convert results to the format expected by rankers
-    votes = []
-    for _, row in experiment_votes.iterrows():
-        vote = {
-            "lhs_id": row['lhs_id'],
-            "rhs_id": row['rhs_id'],
-            "choice": row['choice']  # Using the enum values directly
-        }
-        votes.append(vote)
+    Args:
+        experiment_file: Name of the experiment file being analyzed
+        
+    Returns:
+        Path to the created folder
+    """
+    # Get current timestamp
+    timestamp = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
     
-    # Create and use the appropriate ranker
-    if ranker_type == RankingAlgorithms.WIN_RATE:
-        ranker = WinRateRanker()
-    elif ranker_type == RankingAlgorithms.ELO:
-        ranker = EloRanker()
-    elif ranker_type == RankingAlgorithms.TRUE_SKILL:
-        ranker = TrueSkillRanker()
-    elif ranker_type == RankingAlgorithms.EIGEN:
-        ranker = EigenvectorCentralityRanker()
-    elif ranker_type == RankingAlgorithms.BRADLEY_TERRY:
-        ranker = BradleyTerryRanker()
-    else:
-        raise ValueError(f"Unknown ranker type: {ranker_type}")
+    # Create folder name
+    folder_name = f"{timestamp}-{Path(experiment_file).stem}"
+    analysis_folder = DATA_DIR / folder_name
     
-    ranked_ids = ranker.compute(votes)
-    return ranked_ids
+    # Create the folder
+    analysis_folder.mkdir(parents=True, exist_ok=True)
+    logging.info(f"Created analysis folder: {analysis_folder}")
+    
+    return analysis_folder
 
 def generate_data():
     """Generate and save the experiment, principles, and results data."""
@@ -186,8 +142,14 @@ def generate_data():
     print("\nChoice distribution:")
     print(results_df['choice'].value_counts(normalize=True).sort_index())
 
-def analyze_data():
-    """Read the data files and generate rankings using different algorithms with increasing numbers of votes."""
+def generate_kendall_tau_versus_vote_number(shuffle_results: bool = False, N_repeats: int = 5):
+    """
+    Generate Kendall's Tau correlation values for different numbers of votes using various ranking algorithms.
+    
+    Args:
+        shuffle_results: If True, randomly shuffle the results DataFrame before analysis
+        N_repeats: Number of times to repeat the analysis for each vote count (default: 5)
+    """
     # Define file paths
     experiment_file = DATA_DIR / "experiment_01.csv"
     principles_file = DATA_DIR / "principles_01.csv"
@@ -197,14 +159,20 @@ def analyze_data():
     experiment_df = pd.read_csv(experiment_file)
     principles_df = pd.read_csv(principles_file)
     results_df = pd.read_csv(results_file)
+    
+    # Initial shuffle if requested
+    if shuffle_results:
+        results_df = results_df.sample(frac=1).reset_index(drop=True)
+        logging.info("Results DataFrame has been shuffled")
 
-    print("\n=== Data Analysis Mode ===")
+    logging.info("=== Starting Kendall's Tau Analysis ===")
+    logging.info(f"Number of repeats: {N_repeats}")
 
     # Create rankings for each experiment using each ranker with increasing numbers of votes
     experiment_id = 1  # We know this is the experiment ID from our data generation
     
     # Define the vote increments
-    vote_increments = list(range(100, 10001, 1000))  # 100, 1100, 2100, ..., 9100
+    vote_increments = list(range(50, 1001, 50))  # 100, 1100, 2100, ..., 9100
     
     # Define the ideal ranking (1 to 30)
     ideal_ranking = list(range(1, 31))
@@ -214,75 +182,137 @@ def analyze_data():
     
     # Analyze each ranking algorithm separately
     for ranker_type in RankingAlgorithms:
-        print(f"\n{'='*80}")
-        print(f"Analysis for {ranker_type.value} ranker:")
-        print(f"{'='*80}")
+        logging.info(f"\n{'='*80} \nAnalysis for {ranker_type.value} ranker:\n{'='*80}")
         
         # Store results for this ranker
         tau_values = []
         vote_counts = []
         
         for n_votes in vote_increments:
-            #print(f"\n{'-'*40}")
-            #print(f"Using {n_votes} votes:")
-            #print(f"{'-'*40}")
-            
             # Take only the first n_votes from the results
             subset_results = results_df.head(n_votes)
             
-            ranked_ids = create_ranking_from_results(subset_results, experiment_id, ranker_type)
+            # Run the ranker N times
+            for repeat in range(N_repeats):
+                # Shuffle the subset for each repeat
+                if shuffle_results:
+                    subset_results = subset_results.sample(frac=1).reset_index(drop=True)
+                
+                ranked_ids = create_ranking_from_results(subset_results, experiment_id, ranker_type)
+                
+                # Calculate Kendall's Tau
+                tau, p_value = stats.kendalltau(ranked_ids, ideal_ranking)
+                
+                # Store result for plotting
+                all_results.append({
+                    'Votes': n_votes,
+                    'Kendall\'s Tau': tau,
+                    'Ranker': ranker_type.value,
+                    'Repeat': repeat + 1
+                })
             
-            # Calculate Kendall's Tau
-            tau, p_value = stats.kendalltau(ranked_ids, ideal_ranking)
-            tau_values.append(tau)
+            # Calculate mean tau for this vote count
+            mean_tau = np.mean([r['Kendall\'s Tau'] for r in all_results 
+                              if r['Votes'] == n_votes and r['Ranker'] == ranker_type.value])
+            tau_values.append(mean_tau)
             vote_counts.append(n_votes)
             
-            #print("\nRanked principle IDs (winner at the top):")
-            #print(ranked_ids)
-            #print(f"\nKendall's Tau correlation with ideal ranking: {tau:.3f} (p-value: {p_value:.3e})")
-            #print(f"\n{'-'*40}\n")
-            # Store result for plotting
-            all_results.append({
-                'Votes': n_votes,
-                'Kendall\'s Tau': tau,
-                'Ranker': ranker_type.value
-            })
+            # Log the mean tau value for this vote count
+            logging.info(f"Votes: {n_votes:5d} | Mean Kendall's Tau: {mean_tau:.3f}")
         
-        # Print summary for this ranker
-        print(f"\nSummary for {ranker_type.value} ranker:")
-        print("Votes | Kendall's Tau")
-        print("-" * 20)
+        # Log summary for this ranker
+        logging.info(f"\nSummary for {ranker_type.value} ranker:")
+        logging.info("Votes | Mean Kendall's Tau")
+        logging.info("-" * 25)
         for votes, tau in zip(vote_counts, tau_values):
-            print(f"{votes:5d} | {tau:.3f}")
-        print(f"{'='*80}\n")
+            logging.info(f"{votes:5d} | {tau:.3f}")
+        logging.info(f"{'='*80}\n")
     
-    # Create the plot
-    plt.figure(figsize=(12, 6))
-    df = pd.DataFrame(all_results)
+    # Log the total number of results
+    logging.info(f"Total number of results: {len(all_results)}")
+    logging.info("=== Kendall's Tau Analysis Complete ===")
     
-    # Create swarmplot
-    sns.swarmplot(data=df, x='Votes', y='Kendall\'s Tau', hue='Ranker', palette='Set2')
+    return all_results, N_repeats
+
+# Set the mode: "data_generation" or "data_analysis"
+MODE = "data_analysis"
+N_REPEATS = 10  # Number of repeats for each vote count - kendall tau analysis per ranker for a given number of votes
+CORRECTNESS_STUDIED = [0, 0.50, 0.99, 1.00]  # Different correctness values to study
+
+def get_experiment_files() -> list:
+    """
+    Get all experiment files with 'correctness' in their name.
     
-    # Customize the plot
-    plt.title('Kendall\'s Tau Correlation vs Number of Votes by Ranker')
-    plt.xlabel('Number of Votes')
-    plt.ylabel('Kendall\'s Tau')
-    plt.xticks(rotation=45)
-    plt.legend(title='Ranking Algorithm', bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.tight_layout()
+    Returns:x
+        List of experiment file names
+    """
+    experiment_files = []
+    for file in DATA_DIR.glob("experiment_01_correctness*.csv"):
+        experiment_files.append(file.name)
+    return sorted(experiment_files)
+
+def extract_correctness_from_filename(filename: str) -> float:
+    """
+    Extract the correctness value from the experiment filename.
     
-    # Save the plot
-    plot_file = DATA_DIR / "kendall_tau_analysis.png"
-    plt.savefig(plot_file, dpi=300, bbox_inches='tight')
-    print(f"\nPlot saved to: {plot_file}")
-    
-    # Show the plot
-    plt.show()
+    Args:
+        filename: Name of the experiment file (e.g., 'experiment_01_correctness099.csv')
+        
+    Returns:
+        Correctness value as a float (e.g., 0.99)
+    """
+    # Extract the correctness part (e.g., '099' from 'correctness099')
+    correctness_str = filename.split('correctness')[1].split('.')[0]
+    # Convert to float (e.g., '099' -> 0.99)
+    return float(f"0.{correctness_str}")
 
 if __name__ == "__main__":
     if MODE == "data_generation":
-        generate_data()
+        # Generate datasets for each correctness value
+        for correctness in CORRECTNESS_STUDIED:
+            logging.info(f"\nGenerating dataset with correctness = {correctness}")
+            generate_experiment_data(correctness=correctness)
+            logging.info(f"Dataset generation complete for correctness = {correctness}")
     elif MODE == "data_analysis":
-        analyze_data()
+        # Get all experiment files to analyze
+        experiment_files = get_experiment_files()
+        logging.info(f"Found {len(experiment_files)} experiment files to analyze")
+        
+        # Analyze each experiment file
+        for experiment_file in experiment_files:
+            logging.info(f"\n{'='*80}")
+            logging.info(f"Starting analysis for {experiment_file}")
+            logging.info(f"{'='*80}")
+            
+            # Extract correctness from filename
+            correctness = extract_correctness_from_filename(experiment_file)
+            logging.info(f"Extracted correctness value: {correctness}")
+            
+            # Create analysis folder
+            analysis_folder = create_analysis_folder(experiment_file)
+            
+            # Run the analysis
+            all_results, N_repeats = generate_kendall_tau_versus_vote_number(
+                shuffle_results=True, 
+                N_repeats=N_REPEATS
+            )
+            
+            # Create and save the analysis plots in the new folder
+            create_swarm_plot_kendalls_tau_vs_number_of_votes(
+                all_results, 
+                N_repeats, 
+                output_dir=analysis_folder,
+                correctness=correctness
+            )
+            create_ridge_plot(
+                all_results, 
+                N_repeats, 
+                output_dir=analysis_folder,
+                correctness=correctness
+            )
+            
+            logging.info(f"Analysis complete for {experiment_file}")
+            logging.info(f"Results saved in: {analysis_folder}")
+            logging.info(f"{'='*80}\n")
     else:
         raise ValueError(f"Invalid MODE: {MODE}. Must be either 'data_generation' or 'data_analysis'")

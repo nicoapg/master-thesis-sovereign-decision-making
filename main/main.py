@@ -7,9 +7,7 @@ from utils import read_sgmlp_csv
 import os
 from pathlib import Path
 
-# Get the root directory of the project
-ROOT_DIR = Path(__file__).parent.parent.absolute()
-DATA_DIR = ROOT_DIR / "data" / "20250505-fiona-db-exports"
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
